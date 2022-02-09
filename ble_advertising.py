@@ -69,6 +69,10 @@ def decode_name(payload):
 
 
 def decode_services(payload):
+    return decode_services_complete(payload) + decode_services_more(payload)
+
+
+def decode_services_complete(payload):
     services = []
     for u in decode_field(payload, _ADV_TYPE_UUID16_COMPLETE):
         services.append(bluetooth.UUID(struct.unpack("<h", u)[0]))
@@ -79,12 +83,38 @@ def decode_services(payload):
     return services
 
 
+def decode_services_more(payload):
+    services = []
+    for u in decode_field(payload, _ADV_TYPE_UUID16_MORE):
+        services.append(bluetooth.UUID(struct.unpack("<h", u)[0]))
+    for u in decode_field(payload, _ADV_TYPE_UUID32_MORE):
+        services.append(bluetooth.UUID(struct.unpack("<d", u)[0]))
+    for u in decode_field(payload, _ADV_TYPE_UUID128_MORE):
+        services.append(bluetooth.UUID(u))
+    return services
+
+
 def demo():
+    
+    def b2s(b):
+        if b:
+            s=[]
+            for v in b:
+                s.append("{:02x}".format(v).upper())
+            return " ".join(s)
+        else:
+            return ""
+    
     payload = advertising_payload(
         name="micropython",
         services=[bluetooth.UUID(0x181A), bluetooth.UUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")],
     )
-    print(payload)
+    print(b2s(payload))
+    print(decode_name(payload))
+    print(decode_services(payload))
+
+    payload = b'\x02\x01\x05\x03\x02\x12\x18\x03\x19\xc1\x03\x0c\tAB Shutter3' + payload
+    print(b2s(payload))
     print(decode_name(payload))
     print(decode_services(payload))
 
