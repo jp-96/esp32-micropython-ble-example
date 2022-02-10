@@ -1,17 +1,15 @@
 import bluetooth
-import random
 import struct
 import time
-import micropython
 
 from ble_advertising import decode_services, decode_name
 
 from micropython import const
 
-_IRQ_CENTRAL_CONNECT = const(1)
-_IRQ_CENTRAL_DISCONNECT = const(2)
-_IRQ_GATTS_WRITE = const(3)
-_IRQ_GATTS_READ_REQUEST = const(4)
+# _IRQ_CENTRAL_CONNECT = const(1)
+# _IRQ_CENTRAL_DISCONNECT = const(2)
+# _IRQ_GATTS_WRITE = const(3)
+# _IRQ_GATTS_READ_REQUEST = const(4)
 _IRQ_SCAN_RESULT = const(5)
 _IRQ_SCAN_DONE = const(6)
 _IRQ_PERIPHERAL_CONNECT = const(7)
@@ -22,33 +20,117 @@ _IRQ_GATTC_CHARACTERISTIC_RESULT = const(11)
 _IRQ_GATTC_CHARACTERISTIC_DONE = const(12)
 _IRQ_GATTC_DESCRIPTOR_RESULT = const(13)
 _IRQ_GATTC_DESCRIPTOR_DONE = const(14)
-_IRQ_GATTC_READ_RESULT = const(15)
-_IRQ_GATTC_READ_DONE = const(16)
+# _IRQ_GATTC_READ_RESULT = const(15)
+# _IRQ_GATTC_READ_DONE = const(16)
 _IRQ_GATTC_WRITE_DONE = const(17)
 _IRQ_GATTC_NOTIFY = const(18)
-_IRQ_GATTC_INDICATE = const(19)
-_IRQ_GATTS_INDICATE_DONE = const(20)
-_IRQ_MTU_EXCHANGED = const(21)
-_IRQ_L2CAP_ACCEPT = const(22)
-_IRQ_L2CAP_CONNECT = const(23)
-_IRQ_L2CAP_DISCONNECT = const(24)
-_IRQ_L2CAP_RECV = const(25)
-_IRQ_L2CAP_SEND_READY = const(26)
+# _IRQ_GATTC_INDICATE = const(19)
+# _IRQ_GATTS_INDICATE_DONE = const(20)
+# _IRQ_MTU_EXCHANGED = const(21)
+# _IRQ_L2CAP_ACCEPT = const(22)
+# _IRQ_L2CAP_CONNECT = const(23)
+# _IRQ_L2CAP_DISCONNECT = const(24)
+# _IRQ_L2CAP_RECV = const(25)
+# _IRQ_L2CAP_SEND_READY = const(26)
 _IRQ_CONNECTION_UPDATE = const(27)
-_IRQ_ENCRYPTION_UPDATE = const(28)
-_IRQ_GET_SECRET = const(29)
-_IRQ_SET_SECRET = const(30)
+# _IRQ_ENCRYPTION_UPDATE = const(28)
+# _IRQ_GET_SECRET = const(29)
+# _IRQ_SET_SECRET = const(30)
 
 _ADV_IND = const(0x00)
 _ADV_DIRECT_IND = const(0x01)
-_ADV_SCAN_IND = const(0x02)
-_ADV_NONCONN_IND = const(0x03)
+# _ADV_SCAN_IND = const(0x02)
+# _ADV_NONCONN_IND = const(0x03)
 
-_SERVICE_UUID = bluetooth.UUID(0x1812)          # HID device/service
-_CHARACTERISTIC_UUID = bluetooth.UUID(0x2a4d)   # REPORT characteristic(s)
-_DESCRIPTOR_UUID = bluetooth.UUID(0x2902)       # REPORT descriptor(s)
+_SERV_HRM_UUID = bluetooth.UUID(0x180D)
+_CHAR_HRM_UUID = bluetooth.UUID(0x2A37)
+_DESC_HRM_UUID = bluetooth.UUID(0x2902)
 
-class BLEABShutter3HidCentral:
+_HRM_HRV = const(1) # Heart Rate Measurement Value
+_HRM_SCS = const(2) # Sensor Contact Status
+_HRM_EES = const(3) # Energy Expended
+_HRM_RRI = const(4) # RR-Interval
+
+def decode_heart_rate_measurement(b, t):
+    # org.bluetooth.characteristic.heart_rate_measurement.xml
+    
+    # Flags Field
+    flags = b[0]
+
+    # bit:0   Heart Rate Value Format bit
+    hrv_flag = flags & 1
+    if t == _HRM_HRV:
+        # Heart Rate Measurement Value - org.bluetooth.unit.period.beats_per_minute
+        if hrv_flag == 0:
+            # Heart Rate Measurement Value (uint8)
+            hrv = b[1]
+        else:
+            # Heart Rate Measurement Value (uint16)
+            hrv = b[1] | (b[2] << 8)
+        return hrv
+
+    # bit:2-1 Sensor Contact Status bits
+    scs_flag = (flags >> 1) & 3
+    if t == _HRM_SCS:
+        return scs_flag
+    
+    # bit:3   Energy Expended Status bit
+    ees_flag = (flags >> 3) & 1
+    if t == _HRM_EES:
+        # Energy Expended - org.bluetooth.unit.energy.joule
+        eev = None
+        if ees_flag == 1:
+            idx = 2 + hrv_flag
+            eev = b[idx] | (b[idx + 1] << 8)
+        return eev
+
+    # bit:4   RR-Interval bit
+    rri_flag = (flags >> 4) & 1
+    if t == _HRM_RRI:
+        # RR-Interval - Resolution of 1/1024 second
+        rr = []
+        if rri_flag == 1:
+            idx = 2 + hrv_flag + ees_flag * 2
+            while idx < len(b):
+                rr.append(b[idx] | (b[idx + 1] << 8))
+                idx += 2
+        return rr
+
+
+def decode_heart_rate_value(b):
+    # Heart Rate Measurement Value
+    return decode_heart_rate_measurement(b, _HRM_HRV)
+
+def decode_sensor_contact_status(b):
+    # Sensor Contact Status
+    return decode_heart_rate_measurement(b, _HRM_SCS)
+
+def decode_sensor_contact_status_str(b):
+    scs_flag = decode_sensor_contact_status(b)
+    # Sensor Contact Status
+    if scs_flag == 0:
+        #scs = "0 - Sensor Contact feature is not supported in the current connection"
+        scs = "0:Not supported"
+    elif scs_flag == 1:
+        #scs = "1 - Sensor Contact feature is not supported in the current connection"
+        scs = "1:Not supported"
+    elif scs_flag == 2:
+        #scs = "2 - Sensor Contact feature is supported, but contact is not detected"
+        scs = "2:Not detected"
+    else:
+        #scs = "3 - Sensor Contact feature is supported and contact is detected"
+        scs = "3:Detected"
+    return scs
+
+def decode_energy_expended(b):
+    # Energy Expended
+    return decode_heart_rate_measurement(b, _HRM_EES)
+
+def decode_rr_interval(b):
+    # RR-Interval
+    return decode_heart_rate_measurement(b, _HRM_RRI)
+
+class BLEHeartRateMonitorCentral:
     def __init__(self, ble):
         self._ble = ble
         self._ble.active(True)
@@ -75,33 +157,17 @@ class BLEABShutter3HidCentral:
         self._end_handle = None
 
         # GATTC_CHARACTERISTIC
-        self._report1_handle = None
-        self._report1_dsc_handle = None
-        self._report2_handle = None
-        self._report2_dsc_handle = None
-
+        self._notify_handle = None
+        self._dsc_handle = None
+        
         self._connected = False
 
     def _irq(self, event, data):
         print("_irq() event=", event)
-        if event == _IRQ_CENTRAL_CONNECT:
-            # A central has connected to this peripheral.
-            conn_handle, addr_type, addr = data
-        elif event == _IRQ_CENTRAL_DISCONNECT:
-            # A central has disconnected from this peripheral.
-            conn_handle, addr_type, addr = data
-        elif event == _IRQ_GATTS_WRITE:
-            # A client has written to this characteristic or descriptor.
-            conn_handle, attr_handle = data
-        elif event == _IRQ_GATTS_READ_REQUEST:
-            # A client has issued a read. Note: this is only supported on STM32.
-            # Return a non-zero integer to deny the read (see below), or zero (or None)
-            # to accept the read.
-            conn_handle, attr_handle = data
-        elif event == _IRQ_SCAN_RESULT:
+        if event == _IRQ_SCAN_RESULT:
             # A single scan result, gap_scan().
             addr_type, addr, adv_type, rssi, adv_data = data
-            if adv_type in (_ADV_IND, _ADV_DIRECT_IND) and _SERVICE_UUID in decode_services(adv_data):  # _SERVICE_UUID found.
+            if adv_type in (_ADV_IND, _ADV_DIRECT_IND) and _SERV_HRM_UUID in decode_services(adv_data):  # _SERV_HRM_UUID found.
                 # Found a potential device, remember it and stop scanning.
                 self._addr_type = addr_type
                 self._addr = bytes(
@@ -134,7 +200,7 @@ class BLEABShutter3HidCentral:
         elif event == _IRQ_GATTC_SERVICE_RESULT:
             # Called for each service found by gattc_discover_services().
             conn_handle, start_handle, end_handle, uuid = data
-            if conn_handle == self._conn_handle and uuid == _SERVICE_UUID:  # _SERVICE_UUID found.
+            if conn_handle == self._conn_handle and uuid == _SERV_HRM_UUID:  # _SERV_HRM_UUID found.
                 self._start_handle, self._end_handle = start_handle, end_handle
         elif event == _IRQ_GATTC_SERVICE_DONE:
             # Called once service discovery is complete.
@@ -149,106 +215,51 @@ class BLEABShutter3HidCentral:
         elif event == _IRQ_GATTC_CHARACTERISTIC_RESULT:
             # Called for each characteristic found by gattc_discover_services().
             conn_handle, def_handle, value_handle, properties, uuid = data
-            if conn_handle == self._conn_handle:
-                if uuid == _CHARACTERISTIC_UUID: # _CHARACTERISTIC_UUID found.
-                    if not self._report1_handle:
-                        self._report1_handle = value_handle
-                    elif not self._report2_handle:
-                        self._report2_handle = value_handle
-                    else:
-                        print("Too many characteristics.")
+            if conn_handle == self._conn_handle and uuid == _CHAR_HRM_UUID: # _CHAR_HRM_UUID found.
+                self._notify_handle = value_handle
         elif event == _IRQ_GATTC_CHARACTERISTIC_DONE:
             # Called once service discovery is complete.
             # Note: Status will be zero on success, implementation-specific value otherwise.
             conn_handle, status = data
-            if self._report1_handle and self._report2_handle:
+            if self._notify_handle :
                 self._ble.gattc_discover_descriptors(self._conn_handle, self._start_handle, self._end_handle)
             else:
                 print("Failed to find characteristic.")
         elif event == _IRQ_GATTC_DESCRIPTOR_RESULT:
             # Called for each descriptor found by gattc_discover_descriptors().
             conn_handle, dsc_handle, uuid = data
-            if conn_handle == self._conn_handle and uuid == _DESCRIPTOR_UUID:  # _DESCRIPTOR_UUID found.
-                if not self._report1_dsc_handle and self._report1_handle < dsc_handle and self._report2_handle > dsc_handle:
-                    self._report1_dsc_handle = dsc_handle
-                elif not self._report2_dsc_handle and self._report2_handle < dsc_handle:
-                    self._report2_dsc_handle = dsc_handle
+            if conn_handle == self._conn_handle and uuid == _DESC_HRM_UUID:  # _DESC_HRM_UUID found.
+                self._dsc_handle = dsc_handle
         elif event == _IRQ_GATTC_DESCRIPTOR_DONE:
             # Called once service discovery is complete.
             # Note: Status will be zero on success, implementation-specific value otherwise.
             conn_handle, status = data
-            # We've finished connecting and discovering device, fire the connect callback.
-            self._connected = True
-            if self._conn_callback:
-                self._conn_callback()
-        elif event == _IRQ_GATTC_READ_RESULT:
-            # A gattc_read() has completed.
-            conn_handle, value_handle, char_data = data
-        elif event == _IRQ_GATTC_READ_DONE:
-            # A gattc_read() has completed.
-            # Note: The value_handle will be zero on btstack (but present on NimBLE).
-            # Note: Status will be zero on success, implementation-specific value otherwise.
-            conn_handle, value_handle, status = data
+            if self._dsc_handle:
+                # We've finished connecting and discovering device, fire the connect callback.
+                self._connected = True
+                if self._conn_callback:
+                    self._conn_callback()
+            else:
+                print("Failed to find descriptor.")
         elif event == _IRQ_GATTC_WRITE_DONE:
             # A gattc_write() has completed.
             # Note: The value_handle will be zero on btstack (but present on NimBLE).
             # Note: Status will be zero on success, implementation-specific value otherwise.
             conn_handle, value_handle, status = data
+            print("_IRQ_GATTC_WRITE_DONE")
         elif event == _IRQ_GATTC_NOTIFY:
             # A server has sent a notify request.
             conn_handle, value_handle, notify_data = data
             if conn_handle == self._conn_handle:
                 if self._notify_callback:
                     self._notify_callback(value_handle, bytes(notify_data))
-        elif event == _IRQ_GATTC_INDICATE:
-            # A server has sent an indicate request.
-            conn_handle, value_handle, notify_data = data
-        elif event == _IRQ_GATTS_INDICATE_DONE:
-            # A client has acknowledged the indication.
-            # Note: Status will be zero on successful acknowledgment, implementation-specific value otherwise.
-            conn_handle, value_handle, status = data
-        elif event == _IRQ_MTU_EXCHANGED:
-            # ATT MTU exchange complete (either initiated by us or the remote device).
-            conn_handle, mtu = data
-        elif event == _IRQ_L2CAP_ACCEPT:
-            # A new channel has been accepted.
-            # Return a non-zero integer to reject the connection, or zero (or None) to accept.
-            conn_handle, cid, psm, our_mtu, peer_mtu = data
-        elif event == _IRQ_L2CAP_CONNECT:
-            # A new channel is now connected (either as a result of connecting or accepting).
-            conn_handle, cid, psm, our_mtu, peer_mtu = data
-        elif event == _IRQ_L2CAP_DISCONNECT:
-            # Existing channel has disconnected (status is zero), or a connection attempt failed (non-zero status).
-            conn_handle, cid, psm, status = data
-        elif event == _IRQ_L2CAP_RECV:
-            # New data is available on the channel. Use l2cap_recvinto to read.
-            conn_handle, cid = data
-        elif event == _IRQ_L2CAP_SEND_READY:
-            # A previous l2cap_send that returned False has now completed and the channel is ready to send again.
-            # If status is non-zero, then the transmit buffer overflowed and the application should re-send the data.
-            conn_handle, cid, status = data
         elif event == _IRQ_CONNECTION_UPDATE:
             # The remote device has updated connection parameters.
             conn_handle, conn_interval, conn_latency, supervision_timeout, status = data
-        elif event == _IRQ_ENCRYPTION_UPDATE:
-            # The encryption state has changed (likely as a result of pairing or bonding).
-            conn_handle, encrypted, authenticated, bonded, key_size = data
-        elif event == _IRQ_GET_SECRET:
-            # Return a stored secret.
-            # If key is None, return the index'th value of this sec_type.
-            # Otherwise return the corresponding value for this sec_type and key.
-            sec_type, index, key = data
-            return value
-        elif event == _IRQ_SET_SECRET:
-            # Save a secret to the store for this sec_type and key.
-            sec_type, key, value = data
-            return True
-        elif event == _IRQ_PASSKEY_ACTION:
-            # Respond to a passkey request during pairing.
-            # See gap_passkey() for details.
-            # action will be an action that is compatible with the configured "io" config.
-            # passkey will be non-zero if action is "numeric comparison".
-            conn_handle, action, passkey = data
+            print("_IRQ_CONNECTION_UPDATE")
+        else:
+            # Unhandled
+            print("************ Unhandled ************ event=", event)
 
     # Returns true if we've successfully connected and discovered characteristics.
     def is_connected(self):
@@ -282,14 +293,13 @@ class BLEABShutter3HidCentral:
     def enable_notify(self, callback):
         self._notify_callback = callback
         if self.is_connected():
-            self._ble.gattc_write(self._conn_handle, self._report1_dsc_handle, struct.pack('<h', 1), 1)
-            self._ble.gattc_write(self._conn_handle, self._report2_dsc_handle, struct.pack('<h', 1), 1)
+            self._ble.gattc_write(self._conn_handle, self._dsc_handle, struct.pack('<h', 1), 1)
             
 
 def demo():
     
     ble = bluetooth.BLE()
-    central = BLEABShutter3HidCentral(ble)
+    central = BLEHeartRateMonitorCentral(ble)
 
     def execute():
         
@@ -330,7 +340,67 @@ def demo():
         print("Connected")
 
         def on_notify(value_handle, notify_data):
-            print("on_notify()", value_handle, notify_data, "DOWN" if notify_data[0]==2 else "UP" )
+            # print("on_notify()", value_handle, notify_data)
+            
+            print("  1)", decode_heart_rate_value(notify_data), "bpm")
+            print("  2)", decode_sensor_contact_status_str(notify_data))
+            print("  3)", decode_energy_expended(notify_data), "joule")
+            print("  4)", decode_rr_interval(notify_data), "RR (1/1024 sec)")
+
+            # org.bluetooth.characteristic.heart_rate_measurement.xml
+            idx = 0
+
+            # Flags Field
+            flags = notify_data[idx]
+            idx += 1
+            # bit:0   Heart Rate Value Format bit
+            hrv_flag = (flags    ) & 1
+            # bit:2-1 Sensor Contact Status bits
+            scs_flag = (flags >> 1) & 3
+            # bit:3   Energy Expended Status bit
+            ees_flag = (flags >> 3) & 1
+            # bit:4   RR-Interval bit
+            rri_flag = (flags >> 4) & 1
+
+            # Heart Rate Measurement Value - org.bluetooth.unit.period.beats_per_minute
+            if hrv_flag == 0:
+                # Heart Rate Measurement Value (uint8)
+                hrv = notify_data[idx]
+                idx += 1
+            else:
+                # Heart Rate Measurement Value (uint16)
+                hrv = notify_data[idx] | (notify_data[idx + 1] << 8)
+                idx += 2
+            
+            # Sensor Contact Status
+            scs = None
+            if scs_flag == 0:
+                #scs = "0 - Sensor Contact feature is not supported in the current connection"
+                scs = "0:Not supported"
+            elif scs_flag == 1:
+                #scs = "1 - Sensor Contact feature is not supported in the current connection"
+                scs = "1:Not supported"
+            elif scs_flag == 2:
+                #scs = "2 - Sensor Contact feature is supported, but contact is not detected"
+                scs = "2:Not detected"
+            else:
+                #scs = "3 - Sensor Contact feature is supported and contact is detected"
+                scs = "3:Detected"
+            
+            # Energy Expended - org.bluetooth.unit.energy.joule
+            eev = None
+            if ees_flag == 1:
+                eev = notify_data[idx] | (notify_data[idx + 1] << 8)
+                idx += 2 
+
+            # RR-Interval - Resolution of 1/1024 second
+            rr = []
+            if rri_flag == 1:
+                while idx < len(notify_data):
+                    rr.append(notify_data[idx] | (notify_data[idx + 1] << 8))
+                    idx += 2
+            
+            print("Heart Rate Monitor:", hrv, "bpm ,", scs, ",", eev, ",", rr)
 
         # enable notify
         central.enable_notify(callback=on_notify)
@@ -341,8 +411,11 @@ def demo():
         
         print("Disconnected")
 
-    while True:
-        execute()
+    try:
+        while True:
+            execute()
+    except:
+        ble.active(False)
 
 if __name__ == "__main__":
     demo()
