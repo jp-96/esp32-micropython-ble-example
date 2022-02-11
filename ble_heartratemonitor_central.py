@@ -44,9 +44,13 @@ _ADV_DIRECT_IND = const(0x01)
 
 _SERV_HRM_UUID = bluetooth.UUID(0x180D) # org.bluetooth.service.heart_rate.xml
 _CHAR_HRM_UUID = bluetooth.UUID(0x2A37) # org.bluetooth.characteristic.heart_rate_measurement.xml
-_DESC_CCC_UUID = bluetooth.UUID(0x2902) # org.bluetooth.descriptor.gatt.client_characteristic_configuration.xml
 _CHAR_BSL_UUID = bluetooth.UUID(0x2A38) # org.bluetooth.characteristic.body_sensor_location.xml
 _CHAR_HRC_UUID = bluetooth.UUID(0x2A39) # org.bluetooth.characteristic.heart_rate_control_point.xml
+
+_SERV_BATT_UUID = bluetooth.UUID(0x180F) # org.bluetooth.service.battery_service.xml
+_CHAR_BATT_UUID = bluetooth.UUID(0x2A19) # org.bluetooth.characteristic.battery_level.xml
+
+_DESC_CCC_UUID = bluetooth.UUID(0x2902) # org.bluetooth.descriptor.gatt.client_characteristic_configuration.xml
 
 # decode_heart_rate_measurement t
 _HRM_HRV = const(1) # Heart Rate Measurement Value
@@ -155,18 +159,23 @@ class BLEHeartRateMonitorCentral:
 
         # Persistent callback for when new data is notified from the device.
         self._notify_callback = None
+        self._batt_notify_callback = None
 
         # Connected device.
         self._conn_handle = None
         self._start_handle = None
         self._end_handle = None
+        self._batt_start_handle = None
+        self._batt_end_handle = None
 
         # GATTC_CHARACTERISTIC
-        self._notify_handle = None
+        self._heartrate_handle = None
         self._config_handle = None
         self._location_handle = None
         self._control_handle = None
-        
+        self._batt_level_handle = None
+        self._batt_config_handle = None
+
         self._connected = False
 
     def _irq(self, event, data):
@@ -207,13 +216,20 @@ class BLEHeartRateMonitorCentral:
         elif event == _IRQ_GATTC_SERVICE_RESULT:
             # Called for each service found by gattc_discover_services().
             conn_handle, start_handle, end_handle, uuid = data
-            if conn_handle == self._conn_handle and uuid == _SERV_HRM_UUID:  # _SERV_HRM_UUID found.
-                self._start_handle, self._end_handle = start_handle, end_handle
+            if conn_handle == self._conn_handle:
+                if uuid == _SERV_HRM_UUID:  # _SERV_HRM_UUID found.
+                    self._start_handle, self._end_handle = start_handle, end_handle
+                if uuid == _SERV_BATT_UUID:  # _SERV_BATT_UUID found.
+                    self._batt_start_handle, self._batt_end_handle = start_handle, end_handle
         elif event == _IRQ_GATTC_SERVICE_DONE:
             # Called once service discovery is complete.
             # Note: Status will be zero on success, implementation-specific value otherwise.
             conn_handle, status = data
-            if self._start_handle and self._end_handle:
+            if self._start_handle and self._end_handle and self._batt_start_handle and self._batt_end_handle:
+                self._ble.gattc_discover_characteristics(
+                    self._conn_handle, min(self._start_handle, self._batt_start_handle), max(self._end_handle, self._batt_end_handle)
+                )
+            elif self._start_handle and self._end_handle:
                 self._ble.gattc_discover_characteristics(
                     self._conn_handle, self._start_handle, self._end_handle
                 )
@@ -224,17 +240,19 @@ class BLEHeartRateMonitorCentral:
             conn_handle, def_handle, value_handle, properties, uuid = data
             if conn_handle == self._conn_handle:
                 if uuid == _CHAR_HRM_UUID: # _CHAR_HRM_UUID found.
-                    self._notify_handle = value_handle
+                    self._heartrate_handle = value_handle
                 if uuid == _CHAR_BSL_UUID: # _CHAR_BSL_UUID found.
                     self._location_handle = value_handle
                 if uuid == _CHAR_HRC_UUID: # _CHAR_HRC_UUID found.
                     self._control_handle = value_handle
+                if uuid == _CHAR_BATT_UUID: # _CHAR_BATT_UUID found.
+                    self._batt_level_handle = value_handle
         elif event == _IRQ_GATTC_CHARACTERISTIC_DONE:
             # Called once service discovery is complete.
             # Note: Status will be zero on success, implementation-specific value otherwise.
             conn_handle, status = data
-            if self._notify_handle :
-                self._ble.gattc_discover_descriptors(self._conn_handle, self._notify_handle, self._end_handle)
+            if self._heartrate_handle:
+                self._ble.gattc_discover_descriptors(self._conn_handle, self._heartrate_handle, self._end_handle)
             else:
                 print("Failed to find characteristic.")
         elif event == _IRQ_GATTC_DESCRIPTOR_RESULT:
@@ -265,7 +283,7 @@ class BLEHeartRateMonitorCentral:
         elif event == _IRQ_GATTC_READ_RESULT:
             # A read completed successfully.
             conn_handle, value_handle, char_data = data
-            if conn_handle == self._conn_handle and value_handle == self._location_handle:
+            if conn_handle == self._conn_handle: # and value_handle in [self._location_handle, self._batt_level_handle]:
                 if self._read_callback:
                     self._read_callback(bytes(char_data))
                     self._read_callback = None
@@ -276,8 +294,10 @@ class BLEHeartRateMonitorCentral:
             # A server has sent a notify request.
             conn_handle, value_handle, notify_data = data
             if conn_handle == self._conn_handle:
-                if self._notify_callback:
+                if value_handle == self._heartrate_handle and self._notify_callback:
                     self._notify_callback(value_handle, bytes(notify_data))
+                elif value_handle == self._batt_level_handle and self._batt_notify_callback:
+                    self._batt_notify_callback(value_handle, bytes(notify_data))
         elif event == _IRQ_CONNECTION_UPDATE:
             # The remote device has updated connection parameters.
             conn_handle, conn_interval, conn_latency, supervision_timeout, status = data
@@ -318,7 +338,7 @@ class BLEHeartRateMonitorCentral:
         result = None
         def on_read(v):
             nonlocal result
-            result = v
+            result = v[0]
         self._read_callback = on_read
         # Issues an (asynchronous) read, will invoke callback with data.
         self._ble.gattc_read(conn_handle, value_handle)
@@ -365,6 +385,13 @@ class BLEHeartRateMonitorCentral:
             result = self._gattc_write_sync(self._conn_handle, self._control_handle, struct.pack('b', 1), 1)
             print("enable_energy:", result)
 
+    # Battery level
+    def read_battery_level(self):
+        if not self.is_connected():
+            return
+        if self._batt_level_handle:
+            return self._gattc_read_sync(self._conn_handle, self._batt_level_handle)
+
 def demo():
     
     ble = bluetooth.BLE()
@@ -407,7 +434,13 @@ def demo():
                 return
 
         print("Connected")
-
+        
+        # Battery level
+        level = central.read_battery_level()
+        print("-----------------------------------------")
+        print(" Battery level:", level)
+        print("-----------------------------------------")
+        
         def on_notify(value_handle, notify_data):
             # print("on_notify()", value_handle, notify_data)
             
@@ -476,9 +509,13 @@ def demo():
 
         # Body sensor location
         loc = central.read_body_sensor_location()
-        loc_name = ["0-Other", "1-Chest", "2-Wrist", "3-Finger", "4-Hand", "5-Ear Lobe", "6-Foot"]
+        if loc >= 0 and loc <= 6:
+            loc += 1
+        else:
+            loc = 0
+        loc_name = ["(None)", "0-Other", "1-Chest", "2-Wrist", "3-Finger", "4-Hand", "5-Ear Lobe", "6-Foot"]
         print("-----------------------------------------")
-        print(" body sensor location:", loc_name[loc[0]])
+        print(" body sensor location:", loc_name[loc])
         print("-----------------------------------------")
         
         # Enable energy expanded
